@@ -14,7 +14,6 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.http.HttpHeaders;
 
 import java.net.URI;
-
 @RestController
 public class RedirectController implements RedirectApi {
 
@@ -31,15 +30,16 @@ public class RedirectController implements RedirectApi {
 
         return linkService.resolveAndRecordClick(code)
                 .map(targetUrl -> {
-                    log.info("event=link_redirected requestId={} shortCode={}", requestId, code);
+                    log.info("level=INFO event=link_redirected requestId={} shortCode={}", requestId, code);
                     HttpHeaders headers = new HttpHeaders();
                     headers.setLocation(URI.create(targetUrl));
                     return new ResponseEntity<Void>(headers, HttpStatus.FOUND);
                 })
                 .orElseThrow(() -> {
-                    log.warn("code={} event=link_not_found requestId={} shortCode={}",
+                    log.warn("level=WARN code={} event=link_not_found requestId={} shortCode={}",
                             LogCodes.WARN_LINK_NOT_FOUND, requestId, code);
                     return new LinkNotFoundException("Link code not found: " + code);
                 });
     }
 }
+

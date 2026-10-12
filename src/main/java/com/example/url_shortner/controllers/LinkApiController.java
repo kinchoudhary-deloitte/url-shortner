@@ -26,7 +26,7 @@ public class LinkApiController implements LinksApi {
     @Override
     public ResponseEntity<LinkResponse> createShortLink(CreateLinkRequest request) {
         String requestId = MDC.get("requestId");
-        log.info("event=link_create_requested requestId={}", requestId);
+        log.info("level=INFO event=link_create_requested requestId={}", requestId);
 
         LinkResponse created = linkService.createLink(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
@@ -35,12 +35,12 @@ public class LinkApiController implements LinksApi {
     @Override
     public ResponseEntity<LinkResponse> getLinkMetadata(String code) {
         String requestId = MDC.get("requestId");
-        log.info("event=link_metadata_requested requestId={} shortCode={}", requestId, code);
+        log.info("level=INFO event=link_metadata_requested requestId={} shortCode={}", requestId, code);
 
         return linkService.findByCode(code)
                 .map(ResponseEntity::ok)
                 .orElseThrow(() -> {
-                    log.warn("code={} event=link_not_found requestId={} shortCode={}",
+                    log.warn("level=WARN code={} event=link_not_found requestId={} shortCode={}",
                             LogCodes.WARN_LINK_NOT_FOUND, requestId, code);
                     return new LinkNotFoundException("Link not found with code: " + code);
                 });

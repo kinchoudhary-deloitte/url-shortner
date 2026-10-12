@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
@@ -20,6 +21,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Service
+@ConditionalOnProperty(
+        name = "memory",
+        havingValue = "map",
+        matchIfMissing = false
+)
 public class InMemoryLinkServiceImpl implements LinkService {
 
     private static final Logger log = LoggerFactory.getLogger(InMemoryLinkServiceImpl.class);
