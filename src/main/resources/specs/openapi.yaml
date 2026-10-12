@@ -1,0 +1,190 @@
+openapi: 3.0.3
+info:
+  title: URL Shortener API
+  version: 1.0.0
+  description: Contract-first Link Shortener service supporting link creation, redirects, and metadata lookup.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /api/v1/links:
+    post:
+      summary: Create short link
+      description: Generates a shortened code for the target URL.
+      operationId: createShortLink
+      tags:
+        - Links
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLinkRequest'
+      responses:
+        '201':
+          description: Short link created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkResponse'
+        '400':
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/links/{code}:
+    get:
+      summary: Get link metadata
+      description: Returns metadata associated with the specified short code.
+      operationId: getLinkMetadata
+      tags:
+        - Links
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: The 6-to-12 character alphanumeric short code
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{4,16}$'
+      responses:
+        '200':
+          description: Link metadata found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkResponse'
+        '400':
+          description: Invalid code format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Link not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /{code}:
+    get:
+      summary: Redirect to target URL
+      description: Performs an HTTP 302 redirect to the original target URL.
+      operationId: redirectToTarget
+      tags:
+        - Redirect
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: Short code to resolve
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9_-]{4,16}$'
+      responses:
+        '302':
+          description: Redirecting to target URL
+          headers:
+            Location:
+              description: Target URL destination
+              schema:
+                type: string
+                format: uri
+        '404':
+          description: Short code does not exist or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    CreateLinkRequest:
+      type: object
+      required:
+        - targetUrl
+      properties:
+        targetUrl:
+          type: string
+          format: uri
+          description: Destination URL (must be valid HTTP/HTTPS URL)
+          example: "https://example.com/very/long/url?param=1"
+        customCode:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{4,16}$'
+          description: Optional user-defined short code
+          example: "my-promo-link"
+        ttlSeconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 31536000
+          description: Optional time-to-live in seconds
+          example: 86400
+
+    LinkResponse:
+      type: object
+      required:
+        - code
+        - targetUrl
+        - shortUrl
+        - createdAt
+        - clickCount
+      properties:
+        code:
+          type: string
+          example: "aB12xZ"
+        targetUrl:
+          type: string
+          format: uri
+          example: "https://example.com/very/long/url?param=1"
+        shortUrl:
+          type: string
+          format: uri
+          example: "http://localhost:8080/aB12xZ"
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        clickCount:
+          type: integer
+          format: int64
+          example: 0
+
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+        - requestId
+        - timestamp
+      properties:
+        code:
+          type: string
+          example: "warn_002"
+        message:
+          type: string
+          example: "Short link not found"
+        requestId:
+          type: string
+          example: "d3b07384-d113-4f9e-9717-38435d883b48"
+        timestamp:
+          type: string
+          format: date-time
+        details:
+          type: array
+          items:
+            type: string
