@@ -1,0 +1,212 @@
+package com.example.url_shortner.service;
+
+
+import com.example.demo.model.CreateLinkRequest;
+import com.example.demo.model.LinkResponse;
+import com.example.url_shortner.exceptions.DuplicateCodeException;
+import com.example.url_shortner.exceptions.InvalidUrlException;
+import com.example.url_shortner.exceptions.LogCodes;
+import com.example.url_shortner.models.LinkDocument;
+import com.example.url_shortner.repositories.LinkRepository;
+import org.openapitools.jackson.nullable.JsonNullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.stereotype.Service;
+
+import java.net.URI;
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Optional;
+
+@Service
+@ConditionalOnProperty(
+        name = "memory",
+        havingValue = "mongo",
+        matchIfMissing = false
+)
+public class MongoLinkServiceImpl implements LinkService {
+
+    private static final Logger log = LoggerFactory.getLogger(MongoLinkServiceImpl.class);
+    private static final String ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final int CODE_LENGTH = 7;
+    private static final int MAX_RETRIES = 5;
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final LinkRepository linkRepository;
+    private final MongoTemplate mongoTemplate;
+    private final String baseUrl;
+
+    public MongoLinkServiceImpl(LinkRepository linkRepository,
+                                MongoTemplate mongoTemplate,
+                                @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
+        this.linkRepository = linkRepository;
+        this.mongoTemplate = mongoTemplate;
+        this.baseUrl = baseUrl;
+    }
+
+    @Override
+    public LinkResponse createLink(CreateLinkRequest request) {
+        String requestId = MDC.get("requestId");
+
+        // 1. URL validation
+        validateUrl(request.getTargetUrl());
+
+        // 2. Determine short code
+        boolean isCustom = request.getCustomCode() != null && !request.getCustomCode().isBlank();
+        String code;
+
+        if (isCustom) {
+            code = request.getCustomCode().trim();
+            if (linkRepository.existsByShortCode(code)) {
+                log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
+                        LogCodes.WARN_DUPLICATE_CODE, requestId, code);
+                throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
+            }
+        } else {
+            code = generateUniqueRandomCode();
+        }
+
+        // 3. Compute timestamps
+        Instant now = Instant.now();
+        Instant expiresAt = request.getTtlSeconds() != null
+                ? now.plusSeconds(request.getTtlSeconds())
+                : null;
+
+        var document = new LinkDocument(code, request.getTargetUrl().toString(), now, expiresAt);
+
+        // 4. Persist to MongoDB
+        try {
+            LinkDocument saved = linkRepository.save(document);
+            log.info("level=INFO event=link_created requestId={} shortCode={} hasExpiry={}",
+                    requestId, saved.getShortCode(), expiresAt != null);
+            return toResponse(saved);
+        } catch (DuplicateKeyException ex) {
+            log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
+                    LogCodes.WARN_DUPLICATE_CODE, requestId, code);
+            throw new DuplicateCodeException("Short code '" + code + "' was concurrently claimed.");
+        } catch (Exception ex) {
+            log.error("level=ERROR code={} event=link_persistence_failed requestId={} exception={}",
+                    LogCodes.ERR_LINK_PERSISTENCE, requestId, ex.getClass().getSimpleName(), ex);
+            throw ex;
+        }
+    }
+
+    @Override
+    public Optional<LinkResponse> findByCode(String code) {
+        String requestId = MDC.get("requestId");
+        Optional<LinkDocument> docOpt = linkRepository.findByShortCode(code);
+
+        if (docOpt.isEmpty()) {
+            return Optional.empty();
+        }
+
+        LinkDocument doc = docOpt.get();
+        if (isExpired(doc)) {
+            log.warn("level=WARN code={} event=link_expired requestId={} shortCode={}",
+                    LogCodes.WARN_LINK_EXPIRED, requestId, code);
+            return Optional.empty();
+        }
+
+        return Optional.of(toResponse(doc));
+    }
+
+    @Override
+    public Optional<String> resolveAndRecordClick(String code) {
+        String requestId = MDC.get("requestId");
+        Optional<LinkDocument> docOpt = linkRepository.findByShortCode(code);
+
+        if (docOpt.isEmpty()) {
+            return Optional.empty();
+        }
+
+        LinkDocument doc = docOpt.get();
+        if (isExpired(doc)) {
+            log.warn("level=WARN code={} event=link_expired requestId={} shortCode={}",
+                    LogCodes.WARN_LINK_EXPIRED, requestId, code);
+            return Optional.empty();
+        }
+
+        // Atomic increment of click counter in MongoDB
+        try {
+            Query query = new Query(Criteria.where("shortCode").is(code));
+            Update update = new Update().inc("clickCount", 1);
+            mongoTemplate.updateFirst(query, update, LinkDocument.class);
+        } catch (Exception ex) {
+            log.error("level=ERROR code={} event=link_persistence_failed requestId={} exception={}",
+                    LogCodes.ERR_LINK_PERSISTENCE, requestId, ex.getClass().getSimpleName());
+        }
+
+        return Optional.of(doc.getOriginalUrl());
+    }
+
+    private void validateUrl(URI uri) {
+        String requestId = MDC.get("requestId");
+        if (uri == null) {
+            log.warn("level=WARN code={} event=validation_failed requestId={} message=\"targetUrl is required\"",
+                    LogCodes.WARN_INVALID_URL, requestId);
+            throw new InvalidUrlException("Target URL cannot be null.");
+        }
+
+        String scheme = uri.getScheme();
+        if (scheme == null || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+            log.warn("level=WARN code={} event=validation_failed requestId={} message=\"Invalid scheme: {}\"",
+                    LogCodes.WARN_INVALID_URL, requestId, scheme);
+            throw new InvalidUrlException("Target URL scheme must be http or https.");
+        }
+
+        if (uri.getHost() == null || uri.getHost().isBlank()) {
+            log.warn("level=WARN code={} event=validation_failed requestId={} message=\"Missing host\"",
+                    LogCodes.WARN_INVALID_URL, requestId);
+            throw new InvalidUrlException("Target URL must have a valid domain host.");
+        }
+    }
+
+    private String generateUniqueRandomCode() {
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            String candidate = generateRandomString(CODE_LENGTH);
+            if (!linkRepository.existsByShortCode(candidate)) {
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("Failed to generate a unique short code after multiple attempts.");
+    }
+
+    private String generateRandomString(int length) {
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(ALPHABET.charAt(RANDOM.nextInt(ALPHABET.length())));
+        }
+        return sb.toString();
+    }
+
+    private boolean isExpired(LinkDocument doc) {
+        return doc.getExpiresAt() != null && doc.getExpiresAt().isBefore(Instant.now());
+    }
+
+    private LinkResponse toResponse(LinkDocument doc) {
+        var resp = new LinkResponse();
+        resp.setCode(doc.getShortCode());
+        resp.setTargetUrl(URI.create(doc.getOriginalUrl()));
+        resp.setShortUrl(URI.create(baseUrl + "/" + doc.getShortCode()));
+        resp.setCreatedAt(doc.getCreatedAt().atOffset(ZoneOffset.UTC));
+
+        // Correct nullable handling using JsonNullable
+        if (doc.getExpiresAt() != null) {
+            resp.setExpiresAt(JsonNullable.of(doc.getExpiresAt().atOffset(ZoneOffset.UTC)));
+        } else {
+            resp.setExpiresAt(JsonNullable.undefined());
+        }
+
+        resp.setClickCount(doc.getClickCount());
+        return resp;
+    }
+}

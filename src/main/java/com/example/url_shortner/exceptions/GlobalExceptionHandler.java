@@ -1,6 +1,5 @@
 package com.example.url_shortner.exceptions;
 
-
 import com.example.demo.model.ErrorResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,7 +12,6 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.OffsetDateTime;
 import java.util.List;
-
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -33,6 +31,32 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
     }
 
+    @ExceptionHandler(DuplicateCodeException.class)
+    public ResponseEntity<ErrorResponse> handleDuplicateCode(DuplicateCodeException ex) {
+        String requestId = MDC.get("requestId");
+
+        var error = new ErrorResponse();
+        error.setCode(LogCodes.WARN_DUPLICATE_CODE);
+        error.setMessage(ex.getMessage());
+        error.setRequestId(requestId);
+        error.setTimestamp(OffsetDateTime.now());
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    }
+
+    @ExceptionHandler(InvalidUrlException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidUrl(InvalidUrlException ex) {
+        String requestId = MDC.get("requestId");
+
+        var error = new ErrorResponse();
+        error.setCode(LogCodes.WARN_INVALID_URL);
+        error.setMessage(ex.getMessage());
+        error.setRequestId(requestId);
+        error.setTimestamp(OffsetDateTime.now());
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(error);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidationErrors(MethodArgumentNotValidException ex) {
         String requestId = MDC.get("requestId");
@@ -40,11 +64,11 @@ public class GlobalExceptionHandler {
                 .map(f -> f.getField() + ": " + f.getDefaultMessage())
                 .toList();
 
-        log.warn("code={} event=validation_failed requestId={} errors={}",
-                LogCodes.WARN_INVALID_SHORT_CODE, requestId, details);
+        log.warn("level=WARN code={} event=validation_failed requestId={} errors={}",
+                LogCodes.WARN_INVALID_URL, requestId, details);
 
         var error = new ErrorResponse();
-        error.setCode(LogCodes.WARN_INVALID_SHORT_CODE);
+        error.setCode(LogCodes.WARN_INVALID_URL);
         error.setMessage("Request validation failed");
         error.setRequestId(requestId);
         error.setTimestamp(OffsetDateTime.now());
@@ -57,7 +81,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleGenericException(Exception ex) {
         String requestId = MDC.get("requestId");
 
-        log.error("code={} event=internal_server_error requestId={} exception={} message=\"{}\"",
+        log.error("level=ERROR code={} event=internal_server_error requestId={} exception={} message=\"{}\"",
                 LogCodes.ERR_INTERNAL_SERVER, requestId, ex.getClass().getSimpleName(), ex.getMessage(), ex);
 
         var error = new ErrorResponse();

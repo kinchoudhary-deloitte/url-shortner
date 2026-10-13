@@ -22,6 +22,7 @@ dependencies {
 	// Spring Boot Starters
 	implementation 'org.springframework.boot:spring-boot-starter-web'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springframework.boot:spring-boot-starter-data-mongodb'
 
 	// Springdoc OpenAPI for interactive Swagger UI at /swagger-ui.html
 	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.6.0'
@@ -34,7 +35,6 @@ dependencies {
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-// Configuration for OpenAPI Generator
 openApiGenerate {
 	generatorName = "spring"
 	inputSpec = "$rootDir/src/main/resources/specs/openapi.yaml".toString()
@@ -54,7 +54,6 @@ openApiGenerate {
 	]
 }
 
-// Register the generated directory as a source root for compilation and IDEs
 sourceSets {
 	main {
 		java {
@@ -63,10 +62,8 @@ sourceSets {
 	}
 }
 
-// Ensure code generation runs before compiling Java
 compileJava.dependsOn tasks.openApiGenerate
 
-// Configure JUnit 5 test execution
 tasks.named('test') {
 	useJUnitPlatform()
 	testLogging {

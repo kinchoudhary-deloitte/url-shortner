@@ -4,14 +4,22 @@ server:
 spring:
   application:
     name: url-shortner
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/linkdb}
+      auto-index-creation: true
 
-# Springdoc OpenAPI & Swagger UI Configuration
+memory: mongo
+app:
+  base-url: ${APP_BASE_URL:http://localhost:8080}
+
 springdoc:
   api-docs:
     path: /v3/api-docs
     enabled: true
   swagger-ui:
     path: /swagger-ui.html
-    tags-sorter: alpha
-    operations-sorter: method
-    display-request-duration: true
+    enabled: true
+    operationsSorter: alpha
+    tagsSorter: alpha
+    url: /specs/openapi.yaml

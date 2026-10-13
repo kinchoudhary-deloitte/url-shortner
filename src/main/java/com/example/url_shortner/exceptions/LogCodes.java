@@ -6,7 +6,7 @@ public final class LogCodes {
     // Warning codes (warn_<number>)
     public static final String WARN_LINK_EXPIRED       = "warn_001";
     public static final String WARN_LINK_NOT_FOUND     = "warn_002";
-    public static final String WARN_INVALID_SHORT_CODE = "warn_003";
+    public static final String WARN_INVALID_URL        = "warn_003";
     public static final String WARN_DUPLICATE_CODE     = "warn_004";
 
     // Error codes (error_<number>)
