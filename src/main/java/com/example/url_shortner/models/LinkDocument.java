@@ -1,6 +1,5 @@
 package com.example.url_shortner.models;
 
-
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
@@ -13,14 +12,12 @@ public class LinkDocument {
     @Id
     private String id;
 
-    @Indexed(unique = true)
     private String shortCode;
 
     private String originalUrl;
 
     private Instant createdAt;
 
-    // Optional TTL index can also be applied: @Indexed(expireAfterSeconds = 0)
     private Instant expiresAt;
 
     private long clickCount;

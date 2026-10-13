@@ -12,8 +12,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
@@ -67,6 +69,61 @@ class MongoLinkServiceImplTest {
         }
 
         @Test
+        @DisplayName("Should trim custom code and apply requested expiry")
+        void shouldCreateLinkWithTrimmedCustomCodeAndExpiry() {
+            var request = new CreateLinkRequest();
+            request.setTargetUrl(URI.create("https://example.com/target"));
+            request.setCustomCode("  my-alias  ");
+            request.setTtlSeconds(3600L);
+            when(linkRepository.existsByShortCode("my-alias")).thenReturn(false);
+            when(linkRepository.save(any(LinkDocument.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Instant beforeCreation = Instant.now();
+            LinkResponse response = linkService.createLink(request);
+            Instant afterCreation = Instant.now();
+
+            ArgumentCaptor<LinkDocument> documentCaptor = ArgumentCaptor.forClass(LinkDocument.class);
+            verify(linkRepository).save(documentCaptor.capture());
+            LinkDocument savedDocument = documentCaptor.getValue();
+            assertThat(savedDocument.getShortCode()).isEqualTo("my-alias");
+            assertThat(savedDocument.getCreatedAt()).isBetween(beforeCreation, afterCreation);
+            assertThat(savedDocument.getExpiresAt())
+                    .isEqualTo(savedDocument.getCreatedAt().plusSeconds(3600));
+            assertThat(response.getShortUrl()).isEqualTo(URI.create("http://localhost:8080/my-alias"));
+            verify(linkRepository).existsByShortCode("my-alias");
+        }
+
+        @Test
+        @DisplayName("Should retry generated code when a candidate already exists")
+        void shouldRetryGeneratedCodeAfterCollision() {
+            var request = new CreateLinkRequest();
+            request.setTargetUrl(URI.create("https://example.com/target"));
+            when(linkRepository.existsByShortCode(anyString())).thenReturn(true, false);
+            when(linkRepository.save(any(LinkDocument.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            LinkResponse response = linkService.createLink(request);
+
+            assertThat(response.getCode()).hasSize(7).matches("[a-zA-Z0-9]{7}");
+            verify(linkRepository, times(2)).existsByShortCode(anyString());
+            verify(linkRepository).save(any(LinkDocument.class));
+        }
+
+        @Test
+        @DisplayName("Should fail when no unique generated code is found after retries")
+        void shouldFailWhenGeneratedCodesRemainUnavailable() {
+            var request = new CreateLinkRequest();
+            request.setTargetUrl(URI.create("https://example.com/target"));
+            when(linkRepository.existsByShortCode(anyString())).thenReturn(true);
+
+            assertThatThrownBy(() -> linkService.createLink(request))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to generate a unique short code");
+
+            verify(linkRepository, times(5)).existsByShortCode(anyString());
+            verify(linkRepository, never()).save(any(LinkDocument.class));
+        }
+
+        @Test
         @DisplayName("Should reject invalid URL scheme")
         void shouldRejectInvalidScheme() {
             var request = new CreateLinkRequest();
@@ -75,6 +132,29 @@ class MongoLinkServiceImplTest {
             assertThatThrownBy(() -> linkService.createLink(request))
                     .isInstanceOf(InvalidUrlException.class)
                     .hasMessageContaining("scheme must be http or https");
+        }
+
+        @Test
+        @DisplayName("Should reject a missing target URL")
+        void shouldRejectMissingTargetUrl() {
+            var request = new CreateLinkRequest();
+
+            assertThatThrownBy(() -> linkService.createLink(request))
+                    .isInstanceOf(InvalidUrlException.class)
+                    .hasMessageContaining("cannot be null");
+            verifyNoInteractions(linkRepository);
+        }
+
+        @Test
+        @DisplayName("Should reject a URL without a host")
+        void shouldRejectUrlWithoutHost() {
+            var request = new CreateLinkRequest();
+            request.setTargetUrl(URI.create("http:///target"));
+
+            assertThatThrownBy(() -> linkService.createLink(request))
+                    .isInstanceOf(InvalidUrlException.class)
+                    .hasMessageContaining("valid domain host");
+            verifyNoInteractions(linkRepository);
         }
 
         @Test
@@ -89,6 +169,64 @@ class MongoLinkServiceImplTest {
             assertThatThrownBy(() -> linkService.createLink(request))
                     .isInstanceOf(DuplicateCodeException.class)
                     .hasMessageContaining("already in use");
+            verify(linkRepository, never()).save(any(LinkDocument.class));
+        }
+
+        @Test
+        @DisplayName("Should translate a duplicate-key save race to DuplicateCodeException")
+        void shouldTranslateDuplicateKeyFromSave() {
+            var request = new CreateLinkRequest();
+            request.setTargetUrl(URI.create("https://example.com/target"));
+            request.setCustomCode("my-alias");
+            when(linkRepository.existsByShortCode("my-alias")).thenReturn(false);
+            when(linkRepository.save(any(LinkDocument.class)))
+                    .thenThrow(new DuplicateKeyException("duplicate short code"));
+
+            assertThatThrownBy(() -> linkService.createLink(request))
+                    .isInstanceOf(DuplicateCodeException.class)
+                    .hasMessageContaining("my-alias")
+                    .hasMessageContaining("already in use");
+        }
+    }
+
+    @Nested
+    @DisplayName("findByCode()")
+    class FindByCodeTests {
+
+        @Test
+        @DisplayName("Should return link details for an active code")
+        void shouldReturnActiveLink() {
+            Instant createdAt = Instant.parse("2025-01-01T12:00:00Z");
+            var doc = new LinkDocument("active", "https://example.com/dest", createdAt, null);
+            doc.setClickCount(3);
+            when(linkRepository.findByShortCode("active")).thenReturn(Optional.of(doc));
+
+            Optional<LinkResponse> result = linkService.findByCode("active");
+
+            assertThat(result).isPresent();
+            assertThat(result.get().getCode()).isEqualTo("active");
+            assertThat(result.get().getTargetUrl()).isEqualTo(URI.create("https://example.com/dest"));
+            assertThat(result.get().getShortUrl()).isEqualTo(URI.create("http://localhost:8080/active"));
+            assertThat(result.get().getClickCount()).isEqualTo(3);
+        }
+
+        @Test
+        @DisplayName("Should return empty when code does not exist")
+        void shouldReturnEmptyForUnknownCode() {
+            when(linkRepository.findByShortCode("missing")).thenReturn(Optional.empty());
+
+            assertThat(linkService.findByCode("missing")).isEmpty();
+        }
+
+        @Test
+        @DisplayName("Should return empty when requested link has expired")
+        void shouldReturnEmptyForExpiredLink() {
+            Instant expiredAt = Instant.now().minusSeconds(60);
+            var doc = new LinkDocument("expired", "https://example.com/dest",
+                    expiredAt.minusSeconds(60), expiredAt);
+            when(linkRepository.findByShortCode("expired")).thenReturn(Optional.of(doc));
+
+            assertThat(linkService.findByCode("expired")).isEmpty();
         }
     }
 
@@ -120,6 +258,42 @@ class MongoLinkServiceImplTest {
             assertThat(result).isEmpty();
             verify(mongoTemplate, never()).updateFirst(any(), any(), eq(LinkDocument.class));
         }
+
+        @Test
+        @DisplayName("Should return empty when code does not exist")
+        void shouldReturnEmptyForUnknownCode() {
+            when(linkRepository.findByShortCode("missing")).thenReturn(Optional.empty());
+
+            assertThat(linkService.resolveAndRecordClick("missing")).isEmpty();
+            verifyNoInteractions(mongoTemplate);
+        }
+
+        @Test
+        @DisplayName("Should return destination even if click counter update fails")
+        void shouldReturnDestinationWhenClickUpdateFails() {
+            var doc = new LinkDocument("myCode", "https://example.com/dest", Instant.now(), null);
+            when(linkRepository.findByShortCode("myCode")).thenReturn(Optional.of(doc));
+            when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(LinkDocument.class)))
+                    .thenThrow(new RuntimeException("database unavailable"));
+
+            Optional<String> result = linkService.resolveAndRecordClick("myCode");
+
+            assertThat(result).contains("https://example.com/dest");
+            verify(mongoTemplate).updateFirst(any(Query.class), any(Update.class), eq(LinkDocument.class));
+        }
+    }
+
+    @Nested
+    @DisplayName("purgeExpiredLinks()")
+    class PurgeExpiredLinksTests {
+
+        @Test
+        @DisplayName("Should return the number of deleted expired links")
+        void shouldReturnDeletedLinkCount() {
+            when(linkRepository.deleteByExpiresAtBefore(any(Instant.class))).thenReturn(4L);
+
+            assertThat(linkService.purgeExpiredLinks()).isEqualTo(4L);
+            verify(linkRepository).deleteByExpiresAtBefore(any(Instant.class));
+        }
     }
 }
-

@@ -12,6 +12,9 @@ spring:
 memory: mongo
 app:
   base-url: ${APP_BASE_URL:http://localhost:8080}
+  cleanup:
+    # Runs at minute 0 past every hour (cron: second minute hour day month day-of-week)
+    cron: ${APP_CLEANUP_CRON:0 0 * * * *}
 
 springdoc:
   api-docs:
@@ -22,4 +25,3 @@ springdoc:
     enabled: true
     operationsSorter: alpha
     tagsSorter: alpha
-    url: /specs/openapi.yaml

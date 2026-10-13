@@ -1,6 +1,5 @@
 package com.example.url_shortner.service;
 
-
 import com.example.demo.model.CreateLinkRequest;
 import com.example.demo.model.LinkResponse;
 import com.example.url_shortner.exceptions.DuplicateCodeException;
@@ -13,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -28,11 +26,6 @@ import java.time.ZoneOffset;
 import java.util.Optional;
 
 @Service
-@ConditionalOnProperty(
-        name = "memory",
-        havingValue = "mongo",
-        matchIfMissing = false
-)
 public class MongoLinkServiceImpl implements LinkService {
 
     private static final Logger log = LoggerFactory.getLogger(MongoLinkServiceImpl.class);
@@ -57,25 +50,19 @@ public class MongoLinkServiceImpl implements LinkService {
     public LinkResponse createLink(CreateLinkRequest request) {
         String requestId = MDC.get("requestId");
 
-        // 1. URL validation
+        // 1. Validate Target URL
         validateUrl(request.getTargetUrl());
 
-        // 2. Determine short code
+        // 2. Select or generate short code
         boolean isCustom = request.getCustomCode() != null && !request.getCustomCode().isBlank();
-        String code;
+        String code = isCustom ? request.getCustomCode().trim() : generateUniqueRandomCode();
 
-        if (isCustom) {
-            code = request.getCustomCode().trim();
-            if (linkRepository.existsByShortCode(code)) {
-                log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
-                        LogCodes.WARN_DUPLICATE_CODE, requestId, code);
-                throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
-            }
-        } else {
-            code = generateUniqueRandomCode();
+        if (isCustom && linkRepository.existsByShortCode(code)) {
+            log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
+                    LogCodes.WARN_DUPLICATE_CODE, requestId, code);
+            throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
         }
 
-        // 3. Compute timestamps
         Instant now = Instant.now();
         Instant expiresAt = request.getTtlSeconds() != null
                 ? now.plusSeconds(request.getTtlSeconds())
@@ -83,7 +70,6 @@ public class MongoLinkServiceImpl implements LinkService {
 
         var document = new LinkDocument(code, request.getTargetUrl().toString(), now, expiresAt);
 
-        // 4. Persist to MongoDB
         try {
             LinkDocument saved = linkRepository.save(document);
             log.info("level=INFO event=link_created requestId={} shortCode={} hasExpiry={}",
@@ -92,7 +78,7 @@ public class MongoLinkServiceImpl implements LinkService {
         } catch (DuplicateKeyException ex) {
             log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
                     LogCodes.WARN_DUPLICATE_CODE, requestId, code);
-            throw new DuplicateCodeException("Short code '" + code + "' was concurrently claimed.");
+            throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
         } catch (Exception ex) {
             log.error("level=ERROR code={} event=link_persistence_failed requestId={} exception={}",
                     LogCodes.ERR_LINK_PERSISTENCE, requestId, ex.getClass().getSimpleName(), ex);
@@ -135,7 +121,7 @@ public class MongoLinkServiceImpl implements LinkService {
             return Optional.empty();
         }
 
-        // Atomic increment of click counter in MongoDB
+        // Atomic click increment in MongoDB
         try {
             Query query = new Query(Criteria.where("shortCode").is(code));
             Update update = new Update().inc("clickCount", 1);
@@ -146,6 +132,14 @@ public class MongoLinkServiceImpl implements LinkService {
         }
 
         return Optional.of(doc.getOriginalUrl());
+    }
+
+    @Override
+    public long purgeExpiredLinks() {
+        String requestId = MDC.get("requestId");
+        long deletedCount = linkRepository.deleteByExpiresAtBefore(Instant.now());
+        log.info("level=INFO event=purge_expired_links requestId={} deletedCount={}", requestId, deletedCount);
+        return deletedCount;
     }
 
     private void validateUrl(URI uri) {
@@ -199,7 +193,6 @@ public class MongoLinkServiceImpl implements LinkService {
         resp.setShortUrl(URI.create(baseUrl + "/" + doc.getShortCode()));
         resp.setCreatedAt(doc.getCreatedAt().atOffset(ZoneOffset.UTC));
 
-        // Correct nullable handling using JsonNullable
         if (doc.getExpiresAt() != null) {
             resp.setExpiresAt(JsonNullable.of(doc.getExpiresAt().atOffset(ZoneOffset.UTC)));
         } else {

@@ -1,7 +1,6 @@
 package com.example.url_shortner.service;
 
 
-
 import com.example.demo.model.CreateLinkRequest;
 import com.example.demo.model.LinkResponse;
 import com.example.url_shortner.exceptions.LogCodes;
@@ -39,7 +38,9 @@ public class InMemoryLinkServiceImpl implements LinkService {
         this.baseUrl = baseUrl;
     }
 
-    private record LinkRecord(String code, String targetUrl, OffsetDateTime createdAt, OffsetDateTime expiresAt, AtomicLong clicks) {}
+    private record LinkRecord(String code, String targetUrl, OffsetDateTime createdAt, OffsetDateTime expiresAt,
+                              AtomicLong clicks) {
+    }
 
     @Override
     public LinkResponse createLink(CreateLinkRequest request) {
@@ -87,13 +88,18 @@ public class InMemoryLinkServiceImpl implements LinkService {
         return Optional.of(record.targetUrl());
     }
 
+    @Override
+    public long purgeExpiredLinks() {
+        return 0;
+    }
+
     private LinkResponse toResponse(LinkRecord r) {
         var resp = new LinkResponse();
         resp.setCode(r.code());
         resp.setTargetUrl(java.net.URI.create(r.targetUrl()));
         resp.setShortUrl(java.net.URI.create(baseUrl + "/" + r.code()));
         resp.setCreatedAt(r.createdAt());
-        resp.setExpiresAt(r.expiresAt()!= null ? JsonNullable.of(r.expiresAt()) : JsonNullable.undefined() );
+        resp.setExpiresAt(r.expiresAt() != null ? JsonNullable.of(r.expiresAt()) : JsonNullable.undefined());
         resp.setClickCount(r.clicks().get());
         return resp;
     }
