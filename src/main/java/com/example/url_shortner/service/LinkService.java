@@ -9,4 +9,5 @@ public interface LinkService {
     LinkResponse createLink(CreateLinkRequest request);
     Optional<LinkResponse> findByCode(String code);
     Optional<String> resolveAndRecordClick(String code);
+    long purgeExpiredLinks();
 }

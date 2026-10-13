@@ -38,7 +38,7 @@ public class RedirectController implements RedirectApi {
                 .orElseThrow(() -> {
                     log.warn("level=WARN code={} event=link_not_found requestId={} shortCode={}",
                             LogCodes.WARN_LINK_NOT_FOUND, requestId, code);
-                    return new LinkNotFoundException("Link code not found: " + code);
+                    return new LinkNotFoundException("Link code not found or expired: " + code);
                 });
     }
 }
