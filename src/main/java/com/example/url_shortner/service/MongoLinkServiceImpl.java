@@ -25,14 +25,14 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Optional;
 
+import static com.example.url_shortner.utils.Constants.CODE_LENGTH;
+import static com.example.url_shortner.utils.Constants.MAX_RETRIES;
+import static com.example.url_shortner.utils.Utils.generateUniqueRandomCode;
+
 @Service
 public class MongoLinkServiceImpl implements LinkService {
 
     private static final Logger log = LoggerFactory.getLogger(MongoLinkServiceImpl.class);
-    private static final String ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    private static final int CODE_LENGTH = 7;
-    private static final int MAX_RETRIES = 5;
-    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final LinkRepository linkRepository;
     private final MongoTemplate mongoTemplate;
@@ -54,15 +54,24 @@ public class MongoLinkServiceImpl implements LinkService {
         validateUrl(request.getTargetUrl());
 
         // 2. Select or generate short code
-        boolean isCustom = request.getCustomCode() != null && !request.getCustomCode().isBlank();
-        String code = isCustom ? request.getCustomCode().trim() : generateUniqueRandomCode();
-
-        if (isCustom && linkRepository.existsByShortCode(code)) {
-            log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
-                    LogCodes.WARN_DUPLICATE_CODE, requestId, code);
-            throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
+        String code = null;
+        if(request.getCustomCode() != null){
+            code = request.getCustomCode();
+            if (linkRepository.existsByShortCode(code)) {
+                log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
+                        LogCodes.WARN_DUPLICATE_CODE, requestId, code);
+                throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
+            }
         }
-
+        else{
+            for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                String candidate = generateUniqueRandomCode();
+                if (!linkRepository.existsByShortCode(candidate)) {
+                    code = candidate;
+                }
+            }
+        }
+        //TODO: if code not get created?
         Instant now = Instant.now();
         Instant expiresAt = request.getTtlSeconds() != null
                 ? now.plusSeconds(request.getTtlSeconds())
@@ -164,27 +173,6 @@ public class MongoLinkServiceImpl implements LinkService {
         }
     }
 
-    private String generateUniqueRandomCode() {
-        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            String candidate = generateRandomString(CODE_LENGTH);
-            if (!linkRepository.existsByShortCode(candidate)) {
-                return candidate;
-            }
-        }
-        throw new IllegalStateException("Failed to generate a unique short code after multiple attempts.");
-    }
-
-    private String generateRandomString(int length) {
-        StringBuilder sb = new StringBuilder(length);
-        for (int i = 0; i < length; i++) {
-            sb.append(ALPHABET.charAt(RANDOM.nextInt(ALPHABET.length())));
-        }
-        return sb.toString();
-    }
-
-    private boolean isExpired(LinkDocument doc) {
-        return doc.getExpiresAt() != null && doc.getExpiresAt().isBefore(Instant.now());
-    }
 
     private LinkResponse toResponse(LinkDocument doc) {
         var resp = new LinkResponse();
@@ -202,4 +190,8 @@ public class MongoLinkServiceImpl implements LinkService {
         resp.setClickCount(doc.getClickCount());
         return resp;
     }
+    private boolean isExpired(LinkDocument doc) {
+        return doc.getExpiresAt() != null && doc.getExpiresAt().isBefore(Instant.now());
+    }
+
 }
