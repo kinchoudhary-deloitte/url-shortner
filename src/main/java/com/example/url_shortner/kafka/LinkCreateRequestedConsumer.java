@@ -1,7 +1,8 @@
 package com.example.url_shortner.kafka;
 
-
 import com.example.url_shortner.exceptions.DuplicateCodeException;
+import com.example.url_shortner.exceptions.InvalidPayloadException;
+import com.example.url_shortner.exceptions.SuffixGenerationException;
 import com.example.url_shortner.models.LinkDocument;
 import com.example.url_shortner.repositories.LinkRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -37,72 +38,107 @@ public class LinkCreateRequestedConsumer {
             groupId = "url-shortener-consumer-group",
             containerFactory = "kafkaListenerContainerFactory"
     )
-    public void consume(ConsumerRecord<String, String> record, Acknowledgment ack) throws JsonProcessingException {
+    public void consume(ConsumerRecord<String, String> record, Acknowledgment ack) throws Exception {
         String messageKey = record.key();
-        LinkCreateRequested event = objectMapper.readValue(record.value(), LinkCreateRequested.class);
+        LinkCreateRequested event;
 
-        if (event == null) {
-            log.warn("Received empty or corrupt payload on key: {}", messageKey);
-            return;
+        // 1. Safe JSON Deserialization (Throw to let Spring's DLT handler deal with Poison Pills)
+        try {
+            if (record.value() == null) {
+                throw new InvalidPayloadException("Received record with a null value/payload on key: " + messageKey);
+            }
+            event = objectMapper.readValue(record.value(), LinkCreateRequested.class);
+        } catch (JsonProcessingException e) {
+            log.error("Deserialization failed for record on partition {} offset {}. Key: {}.",
+                    record.partition(), record.offset(), messageKey);
+            // Throwing directly forces Spring Kafka's DefaultErrorHandler to send this straight to the DLT
+            throw new InvalidPayloadException("Malformed JSON payload in partition " + record.partition() + " offset " + record.offset());
         }
 
-        log.info("Processing LinkCreateRequested event. Key (ShortCode): {}, Event ID: {}, Schema Version: {}",
-                messageKey, event.eventId(), event.schemaVersion());
+        if (event == null) {
+            throw new InvalidPayloadException("Deserialized payload resulted in null for key: " + messageKey);
+        }
 
-        // Basic validation of payload
-        if (event.targetUrl() == null || event.eventId() == null || event.ttlSeconds() == null) {
-            log.error("Discarding invalid payload for event: {}", event);
-            return;
+        log.info("Processing LinkCreateRequested. Partition: {}, Offset: {}, Key: {}, Event ID: {}",
+                record.partition(), record.offset(), messageKey, event.eventId());
+
+        // 2. Strict Payload Validation (Throwing instead of returning silently)
+        if (event.eventId() == null || event.targetUrl() == null || event.ttlSeconds() == null) {
+            log.error("Discarding invalid event payload. Missing mandatory fields. Event: {}", event);
+            throw new InvalidPayloadException("Missing mandatory fields (eventId, targetUrl, or ttlSeconds) for Event ID: " + event.eventId());
         }
 
         String customCode = event.customCode();
-        URI targetUrl = event.targetUrl();
+        String targetUrlStr = event.targetUrl().toString();
         String code = null;
 
-        // 1. Fetch any existing record using shortCode
-        if (customCode != null) {
-            Optional<LinkDocument> byShortCode = linkRepository.findByShortCode(customCode);
-            if (byShortCode.isPresent()) {
-                log.info("Link already exists for custom code: {}", customCode);
-                throw new DuplicateCodeException("Link already exists for custom code: " + customCode);
-            }
-            code = customCode;
-        } else {
+        try {
+            // 3. Handle Custom Code Logic (Explicit Idempotency & Conflict Check)
+            if (customCode != null) {
+                if (messageKey != null && !messageKey.equals(customCode)) {
+                    log.warn("Mismatched identifiers! Kafka Key ({}) does not match Payload customCode ({}).",
+                            messageKey, customCode);
+                }
 
-            for (int i = 1; i <= MAX_RETRIES; i++) {
-                String candidate = generateUniqueRandomCode();
-                if (!linkRepository.existsByShortCode(candidate)) {
-                    code = candidate;
-                    break;
+                Optional<LinkDocument> existingDocOpt = linkRepository.findByShortCode(customCode);
+
+                if (existingDocOpt.isPresent()) {
+                    LinkDocument existingDoc = existingDocOpt.get();
+
+                    // Case A: Idempotent Retry (Already Handled - Safe Success)
+                    if (existingDoc.getOriginalUrl().equals(targetUrlStr)) {
+                        log.info("Idempotent processing: Link already exists for custom code '{}' with matching target URL. " +
+                                "Acknowledging message and completing turn.", customCode);
+                        ack.acknowledge(); // Safely commit offset as this is already completed
+                        return;
+                    }
+                    // Case B: Genuine Conflict (Unsafe collision)
+                    else {
+                        log.error("CRITICAL CONFLICT: Custom code '{}' is already claimed by a different target URL! " +
+                                "Existing: '{}' | Requested: '{}'", customCode, existingDoc.getOriginalUrl(), targetUrlStr);
+                        throw new DuplicateCodeException("Conflict: Custom code '" + customCode +
+                                "' is already assigned to a different URL.");
+                    }
+                }
+                code = customCode;
+            }
+            // 4. Handle Auto-Generated Suffix Logic
+            else {
+                for (int i = 1; i <= MAX_RETRIES; i++) {
+                    String candidate = generateUniqueRandomCode();
+                    if (!linkRepository.existsByShortCode(candidate)) {
+                        code = candidate;
+                        break;
+                    }
+                    log.warn("Collision warning: Random code candidate '{}' already exists (Attempt {}/{})", candidate, i, MAX_RETRIES);
+                }
+
+                if (code == null) {
+                    log.error("Exhausted MAX_RETRIES ({}) attempting to find a unique random code.", MAX_RETRIES);
+                    throw new SuffixGenerationException("Failed to generate unique random code after " + MAX_RETRIES + " attempts.");
                 }
             }
-        }
-        // 3. Persist the link to MongoDB
-        try {
-            Instant now = Instant.now();
-            Instant expiresAt = event.ttlSeconds() != null
-                    ? now.plusSeconds(event.ttlSeconds())
-                    : null;
 
-            var document = new LinkDocument(code, event.targetUrl().toString(), now, expiresAt);
+            // 5. Persist to Database
+            Instant now = Instant.now();
+            Instant expiresAt = event.ttlSeconds() > 0 ? now.plusSeconds(event.ttlSeconds()) : null;
+
+            var document = new LinkDocument(code, targetUrlStr, now, expiresAt);
             linkRepository.save(document);
-            // Mark message complete only after successful write
+
+            // 6. Acknowledge ONLY after successful completion of DB write
             ack.acknowledge();
-            log.info("Successfully persisted short link '{}' -> '{}' to MongoDB", code, targetUrl);
+            log.info("Successfully shortened URL. Key: {} | Code: '{}' -> '{}'. DB Save Confirmed.",
+                    messageKey, code, targetUrlStr);
+
+        } catch (DuplicateCodeException | SuffixGenerationException e) {
+            // Functional failures: Propagate directly to Spring Kafka so they can be routed to the DLT instantly
+            log.error("Functional processing error for Event ID: {}. Routing to DLT.", event.eventId(), e);
+            throw e;
         } catch (Exception e) {
-            log.error("Failed to save short link to MongoDB. Event: {}", event.eventId(), e);
-            // Throw exception if you want Spring Kafka's error handler to trigger retries/DLQ
+            // Transient/System failures (e.g., MongoDB timeout): Propagate to trigger Kafka retry loop
+            log.error("Database connection or system error persisting short link. Event ID: {}", event.eventId(), e);
             throw e;
         }
     }
-
-//        CreateLinkRequest request = new CreateLinkRequest();
-//        request.setTargetUrl(event.targetUrl());
-//        request.setCustomCode(event.customCode());
-//        request.setTtlSeconds(event.ttlSeconds());
-//        log.info("Created LinkCreateRequested event: {}", request);
-//        var res = this.linkService.createLink(request);
-//        log.info("LinkResponse event: {}", res);
-
-
 }

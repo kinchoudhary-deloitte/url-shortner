@@ -11,8 +11,8 @@ public record LinkCreateRequested(
         @JsonProperty("schemaVersion") int schemaVersion,
         @JsonProperty("customCode") String customCode,
         @JsonProperty("targetUrl") URI targetUrl,
-        @JsonProperty("ttlSeconds") Long ttlSeconds
-) {
+        @JsonProperty("ttlSeconds") Long ttlSeconds,
+        @JsonProperty("createdAt") Instant createdAt) {
 
     public static final int CURRENT_SCHEMA_VERSION = 1;
 
@@ -23,8 +23,10 @@ public record LinkCreateRequested(
         return new LinkCreateRequested(
                 UUID.randomUUID(),
                 CURRENT_SCHEMA_VERSION,
-                customCode, targetUrl,
-                ttlSeconds
+                customCode,
+                targetUrl,
+                ttlSeconds,
+                Instant.now() // Automatically set the creation timestamp
         );
     }
 }
