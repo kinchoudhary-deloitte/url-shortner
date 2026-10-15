@@ -1,16 +1,16 @@
 package com.example.url_shortner.kafka;
 
 
-import com.example.demo.model.CreateLinkRequest;
+import com.example.url_shortner.exceptions.DuplicateCodeException;
 import com.example.url_shortner.models.LinkDocument;
 import com.example.url_shortner.repositories.LinkRepository;
-import com.example.url_shortner.service.LinkService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -37,7 +37,7 @@ public class LinkCreateRequestedConsumer {
             groupId = "url-shortener-consumer-group",
             containerFactory = "kafkaListenerContainerFactory"
     )
-    public void consume(ConsumerRecord<String, String> record) throws JsonProcessingException {
+    public void consume(ConsumerRecord<String, String> record, Acknowledgment ack) throws JsonProcessingException {
         String messageKey = record.key();
         LinkCreateRequested event = objectMapper.readValue(record.value(), LinkCreateRequested.class);
 
@@ -64,7 +64,7 @@ public class LinkCreateRequestedConsumer {
             Optional<LinkDocument> byShortCode = linkRepository.findByShortCode(customCode);
             if (byShortCode.isPresent()) {
                 log.info("Link already exists for custom code: {}", customCode);
-                return;
+                throw new DuplicateCodeException("Link already exists for custom code: " + customCode);
             }
             code = customCode;
         } else {
@@ -77,23 +77,24 @@ public class LinkCreateRequestedConsumer {
                 }
             }
         }
+        // 3. Persist the link to MongoDB
+        try {
+            Instant now = Instant.now();
+            Instant expiresAt = event.ttlSeconds() != null
+                    ? now.plusSeconds(event.ttlSeconds())
+                    : null;
 
-            // 3. Persist the link to MongoDB
-            try {
-                Instant now = Instant.now();
-                Instant expiresAt = event.ttlSeconds() != null
-                        ? now.plusSeconds(event.ttlSeconds())
-                        : null;
-
-                var document = new LinkDocument(code, event.targetUrl().toString(), now, expiresAt);
-                linkRepository.save(document);
-                log.info("Successfully persisted short link '{}' -> '{}' to MongoDB", code, targetUrl);
-            } catch (Exception e) {
-                log.error("Failed to save short link to MongoDB. Event: {}", event.eventId(), e);
-                // Throw exception if you want Spring Kafka's error handler to trigger retries/DLQ
-                throw e;
-            }
+            var document = new LinkDocument(code, event.targetUrl().toString(), now, expiresAt);
+            linkRepository.save(document);
+            // Mark message complete only after successful write
+            ack.acknowledge();
+            log.info("Successfully persisted short link '{}' -> '{}' to MongoDB", code, targetUrl);
+        } catch (Exception e) {
+            log.error("Failed to save short link to MongoDB. Event: {}", event.eventId(), e);
+            // Throw exception if you want Spring Kafka's error handler to trigger retries/DLQ
+            throw e;
         }
+    }
 
 //        CreateLinkRequest request = new CreateLinkRequest();
 //        request.setTargetUrl(event.targetUrl());
