@@ -104,6 +104,16 @@ curl -X POST http://localhost:8080/api/v1/events/link-create-requests \
 
 Returns `202 Accepted` with the published event after Kafka acknowledges it. The consumer processes the event asynchronously and stores the resulting link.
 
+## Tests
+
+Run the test suite with the Gradle Wrapper:
+
+```powershell
+.\gradlew.bat test
+```
+
+`UrlShortnerEndToEndTest` exercises HTTP link creation and redirects, Redis cache hits, Kafka event publication and persistence, and idempotent duplicate-message delivery. It uses in-process mocks for MongoDB, Redis, and the Kafka broker, so these tests do not require external services.
+
 ## Warning & Error Code Catalog
 
 | Code | Level | Event Name | Description | Key Context Fields |
