@@ -5,6 +5,7 @@ import com.example.url_shortner.exceptions.InvalidPayloadException;
 import com.example.url_shortner.exceptions.SuffixGenerationException;
 import com.example.url_shortner.models.LinkDocument;
 import com.example.url_shortner.repositories.LinkRepository;
+import com.example.url_shortner.service.LinkCache;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -26,10 +27,12 @@ public class LinkCreateRequestedConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(LinkCreateRequestedConsumer.class);
     private final LinkRepository linkRepository;
+    private final LinkCache linkCache;
     private final ObjectMapper objectMapper;
 
-    public LinkCreateRequestedConsumer(LinkRepository linkRepository, ObjectMapper objectMapper) {
+    public LinkCreateRequestedConsumer(LinkRepository linkRepository, LinkCache linkCache, ObjectMapper objectMapper) {
         this.linkRepository = linkRepository;
+        this.linkCache = linkCache;
         this.objectMapper = objectMapper;
     }
 
@@ -89,6 +92,7 @@ public class LinkCreateRequestedConsumer {
                     if (existingDoc.getOriginalUrl().equals(targetUrlStr)) {
                         log.info("Idempotent processing: Link already exists for custom code '{}' with matching target URL. " +
                                 "Acknowledging message and completing turn.", customCode);
+                        linkCache.evict(customCode);
                         ack.acknowledge(); // Safely commit offset as this is already completed
                         return;
                     }
@@ -125,6 +129,7 @@ public class LinkCreateRequestedConsumer {
 
             var document = new LinkDocument(code, targetUrlStr, now, expiresAt);
             linkRepository.save(document);
+            linkCache.evict(code);
 
             // 6. Acknowledge ONLY after successful completion of DB write
             ack.acknowledge();

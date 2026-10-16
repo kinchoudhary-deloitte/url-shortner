@@ -6,6 +6,7 @@ import com.example.url_shortner.exceptions.DuplicateCodeException;
 import com.example.url_shortner.exceptions.InvalidUrlException;
 import com.example.url_shortner.models.LinkDocument;
 import com.example.url_shortner.repositories.LinkRepository;
+import com.example.url_shortner.service.LinkCache;
 import com.example.url_shortner.service.MongoLinkServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -21,6 +22,7 @@ import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
 
 import java.net.URI;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -40,11 +42,15 @@ class MongoLinkServiceImplTest {
     @Mock
     private MongoTemplate mongoTemplate;
 
+    @Mock
+    private LinkCache linkCache;
+
     private MongoLinkServiceImpl linkService;
 
     @BeforeEach
     void setUp() {
-        linkService = new MongoLinkServiceImpl(linkRepository, mongoTemplate, "http://localhost:8080");
+        linkService = new MongoLinkServiceImpl(
+                linkRepository, mongoTemplate, linkCache, "http://localhost:8080", Duration.ofMinutes(5));
     }
 
     @Nested
@@ -244,6 +250,34 @@ class MongoLinkServiceImplTest {
 
             assertThat(result).isPresent().contains("https://example.com/dest");
             verify(mongoTemplate, times(1)).updateFirst(any(Query.class), any(Update.class), eq(LinkDocument.class));
+            verify(linkCache).put(eq("myCode"), eq("https://example.com/dest"), eq(Duration.ofMinutes(5)));
+        }
+
+        @Test
+        @DisplayName("Should resolve cached link without looking it up in MongoDB")
+        void shouldResolveCacheHitWithoutMongoLookup() {
+            when(linkCache.get("popular")).thenReturn(Optional.of("https://example.com/popular"));
+
+            assertThat(linkService.resolveAndRecordClick("popular"))
+                    .contains("https://example.com/popular");
+
+            verifyNoInteractions(linkRepository);
+            verify(mongoTemplate).updateFirst(any(Query.class), any(Update.class), eq(LinkDocument.class));
+            verify(linkCache, never()).put(any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("Should cap cache TTL at the link's remaining lifetime")
+        void shouldCapCacheTtlAtLinkExpiry() {
+            Instant expiresAt = Instant.now().plusSeconds(60);
+            var doc = new LinkDocument("soon-expiring", "https://example.com/dest", Instant.now(), expiresAt);
+            when(linkRepository.findByShortCode("soon-expiring")).thenReturn(Optional.of(doc));
+
+            linkService.resolveAndRecordClick("soon-expiring");
+
+            var ttlCaptor = ArgumentCaptor.forClass(Duration.class);
+            verify(linkCache).put(eq("soon-expiring"), eq("https://example.com/dest"), ttlCaptor.capture());
+            assertThat(ttlCaptor.getValue()).isPositive().isLessThanOrEqualTo(Duration.ofSeconds(60));
         }
 
         @Test
@@ -257,6 +291,7 @@ class MongoLinkServiceImplTest {
 
             assertThat(result).isEmpty();
             verify(mongoTemplate, never()).updateFirst(any(), any(), eq(LinkDocument.class));
+            verify(linkCache, never()).put(any(), any(), any());
         }
 
         @Test
@@ -266,6 +301,7 @@ class MongoLinkServiceImplTest {
 
             assertThat(linkService.resolveAndRecordClick("missing")).isEmpty();
             verifyNoInteractions(mongoTemplate);
+            verify(linkCache, never()).put(any(), any(), any());
         }
 
         @Test
