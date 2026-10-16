@@ -8,6 +8,11 @@ spring:
     mongodb:
       uri: ${MONGODB_URI:mongodb://localhost:27017/linkdb}
       auto-index-creation: true
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: 500ms
+      timeout: 500ms
   kafka:
     bootstrap-servers: localhost:9092
     producer:
@@ -19,6 +24,8 @@ spring:
 memory: mongo
 app:
   base-url: ${APP_BASE_URL:http://localhost:8080}
+  cache:
+    link-ttl: ${LINK_CACHE_TTL:3m}
   cleanup:
     # Runs at minute 0 past every hour (cron: second minute hour day month day-of-week)
     cron: ${APP_CLEANUP_CRON:0 0 * * * *}

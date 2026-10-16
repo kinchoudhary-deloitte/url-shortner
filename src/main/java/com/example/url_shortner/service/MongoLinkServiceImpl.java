@@ -21,6 +21,7 @@ import org.springframework.stereotype.Service;
 
 import java.net.URI;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Optional;
@@ -36,14 +37,20 @@ public class MongoLinkServiceImpl implements LinkService {
 
     private final LinkRepository linkRepository;
     private final MongoTemplate mongoTemplate;
+    private final LinkCache linkCache;
     private final String baseUrl;
+    private final Duration linkCacheTtl;
 
     public MongoLinkServiceImpl(LinkRepository linkRepository,
                                 MongoTemplate mongoTemplate,
-                                @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
+                                LinkCache linkCache,
+                                @Value("${app.base-url:http://localhost:8080}") String baseUrl,
+                                @Value("${app.cache.link-ttl:5m}") Duration linkCacheTtl) {
         this.linkRepository = linkRepository;
         this.mongoTemplate = mongoTemplate;
+        this.linkCache = linkCache;
         this.baseUrl = baseUrl;
+        this.linkCacheTtl = linkCacheTtl;
     }
 
     @Override
@@ -116,6 +123,12 @@ public class MongoLinkServiceImpl implements LinkService {
 
     @Override
     public Optional<String> resolveAndRecordClick(String code) {
+        Optional<String> cachedUrl = linkCache.get(code);
+        if (cachedUrl.isPresent()) {
+            incrementClickCount(code);
+            return cachedUrl;
+        }
+
         String requestId = MDC.get("requestId");
         Optional<LinkDocument> docOpt = linkRepository.findByShortCode(code);
 
@@ -130,7 +143,21 @@ public class MongoLinkServiceImpl implements LinkService {
             return Optional.empty();
         }
 
-        // Atomic click increment in MongoDB
+        Duration cacheTtl = linkCacheTtl;
+        if (doc.getExpiresAt() != null) {
+            Duration remainingLinkTtl = Duration.between(Instant.now(), doc.getExpiresAt());
+            if (remainingLinkTtl.compareTo(cacheTtl) < 0) {
+                cacheTtl = remainingLinkTtl;
+            }
+        }
+        linkCache.put(code, doc.getOriginalUrl(), cacheTtl);
+        incrementClickCount(code);
+
+        return Optional.of(doc.getOriginalUrl());
+    }
+
+    private void incrementClickCount(String code) {
+        String requestId = MDC.get("requestId");
         try {
             Query query = new Query(Criteria.where("shortCode").is(code));
             Update update = new Update().inc("clickCount", 1);
@@ -139,8 +166,6 @@ public class MongoLinkServiceImpl implements LinkService {
             log.error("level=ERROR code={} event=link_persistence_failed requestId={} exception={}",
                     LogCodes.ERR_LINK_PERSISTENCE, requestId, ex.getClass().getSimpleName());
         }
-
-        return Optional.of(doc.getOriginalUrl());
     }
 
     @Override

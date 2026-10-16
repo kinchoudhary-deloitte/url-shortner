@@ -5,6 +5,7 @@ import com.example.url_shortner.exceptions.InvalidPayloadException;
 import com.example.url_shortner.exceptions.SuffixGenerationException;
 import com.example.url_shortner.models.LinkDocument;
 import com.example.url_shortner.repositories.LinkRepository;
+import com.example.url_shortner.service.LinkCache;
 import com.example.url_shortner.utils.Constants;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -23,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -33,6 +35,7 @@ class  LinkCreateRequestedConsumerTest {
     private static final URI TARGET_URL = URI.create("https://example.com/target");
 
     private LinkRepository linkRepository;
+    private LinkCache linkCache;
     private Acknowledgment acknowledgment;
     private LinkCreateRequestedConsumer consumer;
     private ObjectMapper objectMapper;
@@ -40,9 +43,10 @@ class  LinkCreateRequestedConsumerTest {
     @BeforeEach
     void setUp() {
         linkRepository = mock(LinkRepository.class);
+        linkCache = mock(LinkCache.class);
         acknowledgment = mock(Acknowledgment.class);
         objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
-        consumer = new LinkCreateRequestedConsumer(linkRepository, objectMapper);
+        consumer = new LinkCreateRequestedConsumer(linkRepository, linkCache, objectMapper);
     }
 
     @Test
@@ -53,10 +57,14 @@ class  LinkCreateRequestedConsumerTest {
 
         var savedDocument = org.mockito.ArgumentCaptor.forClass(LinkDocument.class);
         verify(linkRepository).save(savedDocument.capture());
+        var persistenceOrder = inOrder(linkRepository, linkCache);
+        persistenceOrder.verify(linkRepository).save(any(LinkDocument.class));
+        persistenceOrder.verify(linkCache).evict("custom1");
         assertThat(savedDocument.getValue().getShortCode()).isEqualTo("custom1");
         assertThat(savedDocument.getValue().getOriginalUrl()).isEqualTo(TARGET_URL.toString());
         assertThat(savedDocument.getValue().getExpiresAt())
                 .isEqualTo(savedDocument.getValue().getCreatedAt().plusSeconds(60));
+        verify(linkCache).evict("custom1");
         verify(acknowledgment).acknowledge();
     }
 
@@ -81,6 +89,7 @@ class  LinkCreateRequestedConsumerTest {
         consumer.consume(record("custom1", event("custom1", 60L)), acknowledgment);
 
         verify(linkRepository, never()).save(any(LinkDocument.class));
+        verify(linkCache).evict("custom1");
         verify(acknowledgment).acknowledge();
     }
 
@@ -96,6 +105,7 @@ class  LinkCreateRequestedConsumerTest {
 
         verify(linkRepository, never()).save(any(LinkDocument.class));
         verifyNoInteractions(acknowledgment);
+        verifyNoInteractions(linkCache);
     }
 
     @Test
@@ -146,6 +156,7 @@ class  LinkCreateRequestedConsumerTest {
         verify(linkRepository, times(Constants.MAX_RETRIES)).existsByShortCode(any());
         verify(linkRepository, never()).save(any(LinkDocument.class));
         verifyNoInteractions(acknowledgment);
+        verifyNoInteractions(linkCache);
     }
 
     @Test
