@@ -17,9 +17,10 @@ class KafkaConsumerConfigTest {
     void consumerFactoryDisablesAutoCommitAndConsumesRawStrings() {
         var config = new KafkaConsumerConfig(mockKafkaTemplate());
 
-        var consumerFactory = (DefaultKafkaConsumerFactory<String, String>) config.consumerFactory();
+        var consumerFactory = (DefaultKafkaConsumerFactory<String, String>) config.consumerFactory("localhost:9092");
 
         assertThat(consumerFactory.getConfigurationProperties())
+                .containsEntry(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092")
                 .containsEntry(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false)
                 .containsEntry(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class)
                 .containsEntry(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class)
@@ -29,7 +30,7 @@ class KafkaConsumerConfigTest {
     @Test
     void listenerContainerUsesManualImmediateAcknowledgmentAndErrorHandler() {
         var config = new KafkaConsumerConfig(mockKafkaTemplate());
-        var consumerFactory = config.consumerFactory();
+        var consumerFactory = config.consumerFactory("localhost:9092");
 
         ConcurrentKafkaListenerContainerFactory<String, String> listenerFactory =
                 config.kafkaListenerContainerFactory(consumerFactory);

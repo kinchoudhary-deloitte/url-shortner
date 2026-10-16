@@ -8,6 +8,39 @@ servers:
     description: Local development server
 
 paths:
+  /api/v1/events/link-create-requests:
+    post:
+      summary: Publish a link creation event
+      description: Publishes a link creation event to Kafka and returns it after broker acknowledgement.
+      operationId: publishLinkCreateRequest
+      tags:
+        - Events
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishLinkCreateRequest'
+      responses:
+        '202':
+          description: Event published successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkCreateRequested'
+        '400':
+          description: Invalid request payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Event could not be published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/v1/links:
     post:
       summary: Create short link
@@ -109,6 +142,54 @@ paths:
 
 components:
   schemas:
+    PublishLinkCreateRequest:
+      type: object
+      required:
+        - targetUrl
+        - ttlSeconds
+      properties:
+        targetUrl:
+          type: string
+          format: uri
+          example: "https://example.com/very/long/url"
+        customCode:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{4,16}$'
+          example: "my-promo-link"
+        ttlSeconds:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 86400
+
+    LinkCreateRequested:
+      type: object
+      required:
+        - eventId
+        - schemaVersion
+        - targetUrl
+        - ttlSeconds
+        - createdAt
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        schemaVersion:
+          type: integer
+          example: 1
+        customCode:
+          type: string
+          nullable: true
+        targetUrl:
+          type: string
+          format: uri
+        ttlSeconds:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+
     CreateLinkRequest:
       type: object
       required:
