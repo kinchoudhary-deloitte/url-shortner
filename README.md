@@ -5,17 +5,23 @@ A Spring Boot service for creating short links, retrieving their metadata, redir
 ## Requirements
 
 - Java 21
-- MongoDB, available at the configured MongoDB URI
-- Redis (optional for caching; cache operations fall back to MongoDB when Redis is unavailable)
-- Kafka (required for the event-publishing API and asynchronous event processing)
+- Docker Engine with the Docker Compose plugin (for the local MongoDB, Redis, and Kafka dependencies below)
 - Gradle is not required separately; the repository includes the Gradle Wrapper
 
-The default local endpoints are MongoDB at `localhost:27017`, Redis at `localhost:6379`, and Kafka at `localhost:9092`. The app listens on port `8080`.
+The app listens on port `8080`. MongoDB is required for startup and persistent link operations. Redis is optional at runtime; lookups fall back to MongoDB if Redis is unavailable. Kafka is required for event publishing and asynchronous processing.
 
 ## Run locally
 
-1. Start MongoDB, Redis, and Kafka. Ensure Kafka is reachable from the app and accepts connections on the configured bootstrap server.
-2. From the repository root, run the app with the Gradle Wrapper:
+1. Start the local dependencies from the repository root:
+
+   ```powershell
+   docker compose up -d
+   docker compose ps
+   ```
+
+   Compose starts MongoDB at `localhost:27017`, Redis at `localhost:6379`, and a single-node Kafka broker at `localhost:9092`. Wait for Kafka to finish starting before launching the app. Inspect startup output with `docker compose logs kafka` if the broker is not ready.
+
+2. Run the app with the Gradle Wrapper:
 
    ```powershell
    .\gradlew.bat bootRun
@@ -32,7 +38,10 @@ The default local endpoints are MongoDB at `localhost:27017`, Redis at `localhos
 
 3. Open the interactive API documentation at [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html). The OpenAPI document is at [http://localhost:8080/v3/api-docs](http://localhost:8080/v3/api-docs).
 
+Stop the app with `Ctrl+C`, then stop the dependencies with `docker compose down`. MongoDB and Kafka data are kept in named Docker volumes. To remove those volumes and their data as well, run `docker compose down --volumes`.
+
 In an IDE, import the project as a Gradle project, select a Java 21 JDK, and run `com.example.url_shortner.UrlShortnerApplication`. MongoDB must be available when the application starts because it creates indexes during startup.
+Start the Compose dependencies first. When running the app in an IDE on the same machine, the default `localhost` service addresses work unchanged.
 
 ## Configuration
 
@@ -61,6 +70,39 @@ $env:APP_BASE_URL = "http://localhost:8080"
 ```
 
 The link API uses MongoDB as its persistent store. Redis is a cache and can be unavailable without preventing MongoDB-backed lookups. Kafka must be available to use the event endpoint; it publishes to the `link-create-requests` topic, which the application also consumes.
+
+## Write and redirect flows
+
+MongoDB is the source of truth for link records, expiration timestamps, and click counts. There are two ways to create a link:
+
+1. **Synchronous REST write:** `POST /api/v1/links` → `LinkApiController` → `MongoLinkServiceImpl` → MongoDB. The response is `201 Created` after the link document is saved.
+2. **Asynchronous Kafka write:** Java `NativeKafkaCliProducer` (exposed by `POST /api/v1/events/link-create-requests`) → Kafka topic `link-create-requests` → Spring `LinkCreateRequestedConsumer` → MongoDB. The HTTP response is `202 Accepted` once Kafka acknowledges publication; it does not mean the consumer has saved the link. The consumer acknowledges the Kafka message only after persistence succeeds.
+
+Both flows ultimately persist link documents in MongoDB. Kafka is the queue for asynchronous creation, not a second link database. The consumer evicts the relevant Redis entry after saving a link or recognizing an already-processed custom code.
+
+Redirects use a Redis read-through cache:
+
+1. `GET /{code}` checks Redis for the destination URL.
+2. On a cache hit, the service returns the URL from Redis and increments the MongoDB click count.
+3. On a cache miss, the service reads the link from MongoDB, rejects missing or expired links, caches an active destination, and redirects.
+4. Cache entries expire after `LINK_CACHE_TTL` or sooner if the link expires. If Redis is unavailable or a cache operation fails, the service falls back to MongoDB; MongoDB remains authoritative.
+
+The link metadata endpoint reads MongoDB directly. Redis is a disposable cache, not a source of truth.
+
+## Failure behavior and recovery
+
+- Invalid URLs and request validation errors return `400`; duplicate aliases in the synchronous link API also return `400`. Unknown or expired codes return `404`. Unexpected request or persistence failures are logged and returned as `500`.
+- A Redis read failure is treated as a cache miss and the lookup continues against MongoDB. Cache write or eviction failures are logged; they do not fail the request or undo a MongoDB write. A failed eviction can leave a stale redirect cached until its TTL expires.
+- A MongoDB failure during synchronous link creation fails the request. During event processing, the consumer does not acknowledge before the MongoDB save succeeds, so a failed save is retried by Kafka's consumer error handler.
+- The consumer error handler retries a failed message three times with a one-second fixed backoff, then publishes it to `<source-topic>.DLT` (for example, `link-create-requests.DLT`). Configure the dead-letter topic with enough partitions for the source topic; the handler routes to the same partition number. Monitor and arrange redrive or manual review of dead-letter messages operationally; this service does not provide a DLT inspection or replay API.
+- Re-delivery is possible. If a custom code already exists for the same destination URL, the consumer treats the event as already processed, evicts its cache entry, and acknowledges it without another save. If the code exists for a different URL, processing fails and the message follows the retry/dead-letter path.
+- Redirects continue if updating the click count fails: the failure is logged, but the redirect succeeds. Click counts are therefore best-effort rather than guaranteed analytics.
+
+## Event contract changes
+
+Kafka event payloads are JSON records with `eventId`, `schemaVersion`, `customCode`, `targetUrl`, `ttlSeconds`, and `createdAt`. Producers set `schemaVersion` to `1`; the event is keyed by `customCode` when present. The consumer checks that `eventId`, `targetUrl`, and `ttlSeconds` are present, but it does not currently branch on or reject unknown schema versions.
+
+There is no schema registry, version-specific deserializer, or automatic event migration. When changing the contract, keep existing fields and meanings compatible with deployed consumers, add new fields as optional where possible, and coordinate breaking changes with all producers and consumers. Test old and new payloads before rollout; a malformed or otherwise unprocessable record is retried and can end up in the DLT.
 
 ## API usage
 
@@ -112,7 +154,17 @@ Run the test suite with the Gradle Wrapper:
 .\gradlew.bat test
 ```
 
+On macOS/Linux, run `./gradlew test`.
+
 `UrlShortnerEndToEndTest` exercises HTTP link creation and redirects, Redis cache hits, Kafka event publication and persistence, and idempotent duplicate-message delivery. It uses in-process mocks for MongoDB, Redis, and the Kafka broker, so these tests do not require external services.
+
+## Current limitations
+
+- MongoDB is required at startup for index creation and for persistent link operations. Redis is optional at runtime, but Kafka is needed for the asynchronous event API and consumer.
+- The asynchronous API has no status endpoint to check when a published event has been processed. Callers may need to poll link metadata or otherwise coordinate out of band.
+- Duplicate event handling is idempotent for a repeated custom code and matching destination, but it does not reconcile changed TTLs or other event fields. A different destination for an existing custom code is a conflict, not an update.
+- Click counting is not guaranteed under database failures, and cache invalidation failures can temporarily serve stale destinations until cache expiry.
+- Dead-letter messages require operator monitoring and replay procedures; no built-in DLT management, alerting, or schema migration workflow is provided.
 
 ## Warning & Error Code Catalog
 
