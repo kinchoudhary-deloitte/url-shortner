@@ -62,23 +62,27 @@ public class MongoLinkServiceImpl implements LinkService {
 
         // 2. Select or generate short code
         String code = null;
-        if(request.getCustomCode() != null){
-            code = request.getCustomCode();
+        if (request.getCustomCode() != null) {
+            code = request.getCustomCode().trim();
             if (linkRepository.existsByShortCode(code)) {
                 log.warn("level=WARN code={} event=duplicate_code requestId={} shortCode={}",
                         LogCodes.WARN_DUPLICATE_CODE, requestId, code);
                 throw new DuplicateCodeException("Short code '" + code + "' is already in use.");
             }
-        }
-        else{
+        } else {
             for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
                 String candidate = generateUniqueRandomCode();
                 if (!linkRepository.existsByShortCode(candidate)) {
                     code = candidate;
+                    break;
                 }
             }
+            if (code == null) {
+                throw new IllegalStateException("Failed to generate a unique short code after "
+                        + MAX_RETRIES + " attempts.");
+            }
         }
-        //TODO: if code not get created?
+
         Instant now = Instant.now();
         Instant expiresAt = request.getTtlSeconds() != null
                 ? now.plusSeconds(request.getTtlSeconds())
